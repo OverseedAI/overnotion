@@ -4,7 +4,7 @@
   "description": "A modern, full-featured Notion CLI",
   "type": "module",
   "bin": {
-    "onotion": "./dist/index.js"
+    "onotion": "dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -31,7 +31,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OverseedAI/overnotion"
+    "url": "git+https://github.com/OverseedAI/overnotion.git"
   },
   "dependencies": {
     "@notionhq/client": "^2.2.15",
