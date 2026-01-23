@@ -7,12 +7,14 @@ import type {
   QueryDatabaseResponse,
 } from '@notionhq/client/build/src/api-endpoints';
 
-export type OutputFormat = 'table' | 'json' | 'plain';
+export type OutputFormat = 'table' | 'json' | 'plain' | 'compact';
 
 export interface GlobalOptions {
   output?: OutputFormat;
   verbose?: boolean;
   config?: string;
+  fields?: string;
+  stream?: boolean;
 }
 
 export interface AppConfig {

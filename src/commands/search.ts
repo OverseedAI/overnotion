@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { search } from '../lib/client.js';
 import { getApiKey } from '../lib/config.js';
 import { handleError, requireAuth } from '../lib/errors.js';
-import { output, extractPageTitle, extractDatabaseTitle } from '../lib/output.js';
+import { output, outputLine, parseFieldsInput, extractPageTitle, extractDatabaseTitle } from '../lib/output.js';
 import type { GlobalOptions, PageObjectResponse, DatabaseObjectResponse } from '../types/index.js';
 import Table from 'cli-table3';
 
@@ -53,10 +53,69 @@ export function createSearchCommand(): Command {
           };
         }
 
-        const response = await search(query, searchOptions, apiKey, globalOpts.config);
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+        const limitValue = options.limit ? parseInt(options.limit, 10) : 20;
+        const totalLimit = Number.isFinite(limitValue) && limitValue > 0 ? limitValue : 20;
 
-        if (globalOpts.output === 'json') {
+        if (globalOpts.stream) {
+          if (outputFormat !== 'json' && outputFormat !== 'compact') {
+            console.error(chalk.red('Error: --stream is only supported with -o json or -o compact.'));
+            process.exit(1);
+          }
+
+          let remaining = totalLimit;
+          let cursor = options.startCursor;
+
+          do {
+            const pageSize = Math.min(remaining, 100);
+            const response = await search(
+              query,
+              {
+                ...searchOptions,
+                page_size: pageSize,
+                start_cursor: cursor,
+              },
+              apiKey,
+              globalOpts.config
+            );
+
+            for (const item of response.results) {
+              outputLine(item, outputFormat, globalOpts.fields);
+            }
+
+            remaining -= response.results.length;
+            cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+          } while (cursor && remaining > 0);
+
+          return;
+        }
+
+        const response = await search(
+          query,
+          {
+            ...searchOptions,
+            page_size: Math.min(totalLimit, 100),
+          },
+          apiKey,
+          globalOpts.config
+        );
+
+        if (outputFormat === 'json' && !fields) {
           output(response, 'json');
+          return;
+        }
+
+        if (outputFormat !== 'table' || fields) {
+          if (response.results.length === 0) {
+            if (outputFormat === 'plain') {
+              console.log(chalk.yellow('No results found.'));
+            } else if (outputFormat === 'json') {
+              output([], 'json');
+            }
+            return;
+          }
+          output(response.results, outputFormat, { fields: globalOpts.fields });
           return;
         }
 

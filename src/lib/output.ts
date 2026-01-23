@@ -8,19 +8,61 @@ import type {
   UserObjectResponse,
 } from '@notionhq/client/build/src/api-endpoints';
 
-export function output(data: unknown, format: OutputFormat = 'table'): void {
+export interface OutputOptions {
+  fields?: string | string[];
+}
+
+export function parseFieldsInput(fields?: string | string[]): string[] | undefined {
+  if (!fields) return undefined;
+  const list = Array.isArray(fields) ? fields : fields.split(',');
+  const normalized = list
+    .map((value) => normalizeKey(value.trim()))
+    .filter((value) => value.length > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+export function output(data: unknown, format: OutputFormat = 'table', options: OutputOptions = {}): void {
+  const fields = parseFieldsInput(options.fields);
+
+  if (format === 'compact') {
+    outputCompact(data, fields);
+    return;
+  }
+
+  const processed = fields ? applyFields(data, fields) : data;
+
   switch (format) {
     case 'json':
-      console.log(JSON.stringify(data, null, 2));
+      console.log(JSON.stringify(processed, null, 2));
       break;
     case 'plain':
-      console.log(formatPlain(data));
+      console.log(formatPlain(processed));
       break;
     case 'table':
     default:
-      console.log(formatTable(data));
+      console.log(formatTable(processed, fields));
       break;
   }
+}
+
+export function outputLine(data: unknown, format: OutputFormat, fields?: string | string[]): void {
+  const parsedFields = parseFieldsInput(fields);
+
+  if (format === 'compact') {
+    const record = flattenRecord(data);
+    if (!record) return;
+    const line = JSON.stringify(parsedFields ? pickFields(record, parsedFields) : record);
+    console.log(line);
+    return;
+  }
+
+  const processed = parsedFields ? applyFields(data, parsedFields) : data;
+  if (format === 'json') {
+    console.log(JSON.stringify(processed));
+    return;
+  }
+
+  console.log(formatPlain(processed));
 }
 
 function formatPlain(data: unknown): string {
@@ -34,7 +76,7 @@ function formatPlain(data: unknown): string {
   return String(data);
 }
 
-function formatTable(data: unknown): string {
+function formatTable(data: unknown, fields?: string[]): string {
   if (Array.isArray(data)) {
     if (data.length === 0) return 'No results found.';
     const first = data[0];
@@ -42,6 +84,7 @@ function formatTable(data: unknown): string {
     if (isDatabaseObject(first)) return formatDatabasesTable(data as DatabaseObjectResponse[]);
     if (isBlockObject(first)) return formatBlocksTable(data as BlockObjectResponse[]);
     if (isUserObject(first)) return formatUsersTable(data as UserObjectResponse[]);
+    if (isPlainObject(first)) return formatObjectsTable(data as Record<string, unknown>[], fields);
   }
 
   if (typeof data === 'object' && data !== null) {
@@ -49,9 +92,127 @@ function formatTable(data: unknown): string {
     if (isDatabaseObject(data)) return formatDatabaseDetail(data);
     if (isBlockObject(data)) return formatBlockDetail(data);
     if (isUserObject(data)) return formatUserDetail(data);
+    if (isPlainObject(data)) return formatObjectDetail(data as Record<string, unknown>);
   }
 
   return formatPlain(data);
+}
+
+function normalizeKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function pickFields(record: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  const selected: Record<string, unknown> = {};
+  for (const field of fields) {
+    selected[field] = record[field] ?? null;
+  }
+  return selected;
+}
+
+function applyFields(data: unknown, fields: string[]): unknown {
+  if (Array.isArray(data)) {
+    return data.map((item) => applyFields(item, fields));
+  }
+
+  const flat = flattenRecord(data);
+  if (flat) {
+    return pickFields(flat, fields);
+  }
+
+  if (isPlainObject(data)) {
+    if ('results' in data && Array.isArray(data.results)) {
+      return (data.results as unknown[]).map((item) => applyFields(item, fields));
+    }
+
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key === 'page' || key === 'block' || key === 'database' || key === 'user') {
+        result[key] = applyFields(value, fields);
+        continue;
+      }
+      if (key === 'blocks' && Array.isArray(value)) {
+        result[key] = value.map((item) => applyFields(item, fields));
+        continue;
+      }
+      result[key] = value;
+    }
+    return result;
+  }
+
+  return data;
+}
+
+function outputCompact(data: unknown, fields?: string[]): void {
+  const records = collectCompactRecords(data);
+  if (records.length === 0) return;
+
+  for (const record of records) {
+    const line = JSON.stringify(fields ? pickFields(record, fields) : record);
+    console.log(line);
+  }
+}
+
+function collectCompactRecords(data: unknown): Record<string, unknown>[] {
+  if (Array.isArray(data)) {
+    return data.flatMap((item) => collectCompactRecords(item));
+  }
+
+  if (isPlainObject(data)) {
+    if ('results' in data && Array.isArray(data.results)) {
+      return (data.results as unknown[]).flatMap((item) => collectCompactRecords(item));
+    }
+
+    const records: Record<string, unknown>[] = [];
+    if ('page' in data && data.page) {
+      records.push(...collectCompactRecords(data.page));
+    }
+    if ('block' in data && data.block) {
+      records.push(...collectCompactRecords(data.block));
+    }
+    if ('database' in data && data.database) {
+      records.push(...collectCompactRecords(data.database));
+    }
+    if ('user' in data && data.user) {
+      records.push(...collectCompactRecords(data.user));
+    }
+    if ('blocks' in data && Array.isArray(data.blocks)) {
+      records.push(...collectCompactRecords(data.blocks));
+    }
+
+    if (records.length > 0) {
+      return records;
+    }
+  }
+
+  const flat = flattenRecord(data);
+  if (flat) {
+    return [flat];
+  }
+
+  return [];
+}
+
+function flattenRecord(data: unknown): Record<string, unknown> | null {
+  if (isPageObject(data)) return flattenPage(data);
+  if (isDatabaseObject(data)) return flattenDatabase(data);
+  if (isBlockObject(data)) return flattenBlock(data);
+  if (isUserObject(data)) return flattenUser(data);
+  if (isPlainObject(data)) {
+    if ('results' in data || 'page' in data || 'block' in data || 'blocks' in data || 'database' in data || 'user' in data) {
+      return null;
+    }
+    return data;
+  }
+  return null;
 }
 
 // Type guards
@@ -220,6 +381,30 @@ function formatUserDetail(user: UserObjectResponse): string {
   return lines.join('\n');
 }
 
+function formatObjectsTable(rows: Record<string, unknown>[], fields?: string[]): string {
+  const columns = fields && fields.length > 0
+    ? fields
+    : Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+
+  const table = new Table({
+    head: columns.map((col) => chalk.cyan(col)),
+    colWidths: columns.map(() => 24),
+    wordWrap: true,
+  });
+
+  for (const row of rows) {
+    table.push(columns.map((col) => formatPlain(row[col] ?? '')));
+  }
+
+  return table.toString();
+}
+
+function formatObjectDetail(data: Record<string, unknown>): string {
+  return Object.entries(data)
+    .map(([key, value]) => `${chalk.cyan(key)}: ${formatPlain(value)}`)
+    .join('\n');
+}
+
 // Helper functions
 export function extractPageTitle(page: PageObjectResponse): string {
   for (const prop of Object.values(page.properties)) {
@@ -321,6 +506,81 @@ export function extractBlockContent(block: BlockObjectResponse): string {
   }
 
   return '';
+}
+
+function flattenPage(page: PageObjectResponse): Record<string, unknown> {
+  const record: Record<string, unknown> = {
+    type: 'page',
+    id: page.id,
+    title: extractPageTitle(page),
+    url: page.url,
+    created: formatIsoDate(page.created_time),
+    updated: formatIsoDate(page.last_edited_time),
+  };
+
+  for (const [name, prop] of Object.entries(page.properties)) {
+    if (prop.type === 'title') continue;
+    const key = normalizeKey(name);
+    if (!key) continue;
+    setUniqueField(record, key, extractPropertyValue(prop));
+  }
+
+  return record;
+}
+
+function flattenDatabase(db: DatabaseObjectResponse): Record<string, unknown> {
+  return {
+    type: 'database',
+    id: db.id,
+    title: extractDatabaseTitle(db),
+    url: db.url,
+    created: formatIsoDate(db.created_time),
+    updated: formatIsoDate(db.last_edited_time),
+    properties: Object.keys(db.properties || {}).join(', '),
+  };
+}
+
+function flattenBlock(block: BlockObjectResponse): Record<string, unknown> {
+  const parentId = block.parent && 'page_id' in block.parent ? block.parent.page_id
+    : block.parent && 'block_id' in block.parent ? block.parent.block_id
+      : undefined;
+
+  return {
+    type: 'block',
+    id: block.id,
+    block_type: block.type,
+    content: extractBlockContent(block),
+    has_children: block.has_children,
+    parent_id: parentId,
+    created: formatIsoDate(block.created_time),
+    updated: formatIsoDate(block.last_edited_time),
+  };
+}
+
+function flattenUser(user: UserObjectResponse): Record<string, unknown> {
+  return {
+    type: 'user',
+    id: user.id,
+    name: user.name || 'Unknown',
+    user_type: user.type,
+  };
+}
+
+function setUniqueField(record: Record<string, unknown>, key: string, value: unknown): void {
+  let finalKey = key;
+  let suffix = 2;
+  while (finalKey in record) {
+    finalKey = `${key}_${suffix}`;
+    suffix += 1;
+  }
+  record[finalKey] = value;
+}
+
+function formatIsoDate(dateString?: string): string {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 10);
 }
 
 function formatDate(dateString: string): string {

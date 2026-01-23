@@ -4,7 +4,7 @@ import chalk from 'chalk';
 import { setApiKey, clearApiKey, getApiKey, getConfigPath } from '../lib/config.js';
 import { getCurrentUser, validateApiKey } from '../lib/client.js';
 import { handleError } from '../lib/errors.js';
-import { output, success, info } from '../lib/output.js';
+import { output, parseFieldsInput, success, info } from '../lib/output.js';
 import type { GlobalOptions } from '../types/index.js';
 
 export function createAuthCommand(): Command {
@@ -114,9 +114,15 @@ export function createAuthCommand(): Command {
 
         const user = await getCurrentUser(apiKey, globalOpts.config);
 
-        if (globalOpts.output === 'json') {
-          output(user, 'json');
-        } else {
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+
+        if (outputFormat !== 'table' || fields) {
+          output(user, outputFormat, { fields: globalOpts.fields });
+          return;
+        }
+
+        {
           console.log(chalk.bold('\nCurrent User\n'));
           console.log(`${chalk.cyan('Name:')} ${user.name || 'Unknown'}`);
           console.log(`${chalk.cyan('ID:')} ${user.id}`);

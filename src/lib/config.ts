@@ -8,7 +8,7 @@ const CONFIG_SCHEMA = {
   defaultOutput: {
     type: 'string' as const,
     default: 'table' as OutputFormat,
-    enum: ['table', 'json', 'plain'],
+    enum: ['table', 'json', 'plain', 'compact'],
   },
   defaultDatabase: {
     type: 'string' as const,

@@ -6,11 +6,18 @@ import {
   updatePage,
   archivePage,
   getBlockChildren,
-  appendBlockChildren,
 } from '../lib/client.js';
+import {
+  DEFAULT_BATCH_SIZE,
+  DEFAULT_DELAY_MS,
+  appendBlockChildrenInBatches,
+  parseBatchSize,
+  parseBlockChildrenInput,
+  parseDelayMs,
+} from '../lib/blocks.js';
 import { getApiKey } from '../lib/config.js';
 import { handleError, requireAuth } from '../lib/errors.js';
-import { output, success, extractBlockContent, extractPageTitle } from '../lib/output.js';
+import { output, parseFieldsInput, success, extractBlockContent, extractPageTitle } from '../lib/output.js';
 import type { GlobalOptions, PageObjectResponse, BlockObjectResponse } from '../types/index.js';
 import type { CreatePageParameters, BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
 
@@ -32,7 +39,10 @@ export function createPageCommand(): Command {
 
         const pageData = await getPage(pageId, apiKey, globalOpts.config) as PageObjectResponse;
 
-        if (globalOpts.output === 'json') {
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+
+        if (outputFormat !== 'table' || fields) {
           const result: { page: PageObjectResponse; blocks?: BlockObjectResponse[] } = { page: pageData };
 
           if (options.content) {
@@ -40,21 +50,22 @@ export function createPageCommand(): Command {
             result.blocks = blocks;
           }
 
-          output(result, 'json');
-        } else {
-          output(pageData, 'table');
+          output(options.content ? result : pageData, outputFormat, { fields: globalOpts.fields });
+          return;
+        }
 
-          if (options.content) {
-            console.log('');
-            console.log(chalk.bold('Content:'));
-            console.log('');
+        output(pageData, 'table');
 
-            const blocks = await fetchAllBlocks(pageId, parseInt(options.depth || '1', 10), apiKey, globalOpts.config);
-            for (const block of blocks) {
-              const content = extractBlockContent(block);
-              const indent = '  ';
-              console.log(`${indent}${chalk.gray(`[${block.type}]`)} ${content || chalk.gray('(empty)')}`);
-            }
+        if (options.content) {
+          console.log('');
+          console.log(chalk.bold('Content:'));
+          console.log('');
+
+          const blocks = await fetchAllBlocks(pageId, parseInt(options.depth || '1', 10), apiKey, globalOpts.config);
+          for (const block of blocks) {
+            const content = extractBlockContent(block);
+            const indent = '  ';
+            console.log(`${indent}${chalk.gray(`[${block.type}]`)} ${content || chalk.gray('(empty)')}`);
           }
         }
 
@@ -292,31 +303,104 @@ export function createPageCommand(): Command {
   page
     .command('append <page-id>')
     .description('Append content to a page')
-    .requiredOption('-c, --content <text>', 'Content to append')
+    .option('-c, --content <text>', 'Content to append')
     .option('--type <type>', 'Block type (paragraph, heading_1, heading_2, heading_3, bulleted_list_item, numbered_list_item, to_do, toggle, quote, callout, code)', 'paragraph')
-    .action(async (pageId: string, options: { content: string; type?: string }) => {
+    .option('--children <json>', 'JSON array (or {"children":[...]}) of Notion blocks to append')
+    .option('--children-file <path>', 'Path to JSON file with array (or {"children":[...]}) of Notion blocks')
+    .option('--batch-size <number>', 'Max children per request (1-100)', String(DEFAULT_BATCH_SIZE))
+    .option('--delay-ms <number>', 'Delay between batch requests in ms', String(DEFAULT_DELAY_MS))
+    .action(async (pageId: string, options: {
+      content?: string;
+      type?: string;
+      children?: string;
+      childrenFile?: string;
+      batchSize?: string;
+      delayMs?: string;
+    }) => {
       const globalOpts = page.optsWithGlobals<GlobalOptions>();
 
       try {
         const apiKey = getApiKey(globalOpts.config);
         requireAuth(apiKey);
 
-        const blockType = options.type || 'paragraph';
-        const validTypes = [
-          'paragraph', 'heading_1', 'heading_2', 'heading_3',
-          'bulleted_list_item', 'numbered_list_item', 'to_do',
-          'toggle', 'quote', 'callout', 'code',
-        ];
-
-        if (!validTypes.includes(blockType)) {
-          console.error(chalk.red(`Error: Invalid block type "${blockType}". Valid types: ${validTypes.join(', ')}`));
-          process.exit(1);
+        const bulkChildren = parseBlockChildrenInput(options.children, options.childrenFile);
+        if (bulkChildren && options.content) {
+          throw new Error('Provide either --content or --children/--children-file, not both.');
         }
 
-        const block: BlockObjectRequest = createBlock(blockType, options.content);
+        let children = bulkChildren;
+        if (!children) {
+          if (!options.content) {
+            throw new Error('Provide --content or --children/--children-file.');
+          }
 
-        await appendBlockChildren(pageId, [block], apiKey, globalOpts.config);
-        success(`Content appended successfully!`);
+          const blockType = options.type || 'paragraph';
+          const validTypes = [
+            'paragraph', 'heading_1', 'heading_2', 'heading_3',
+            'bulleted_list_item', 'numbered_list_item', 'to_do',
+            'toggle', 'quote', 'callout', 'code',
+          ];
+
+          if (!validTypes.includes(blockType)) {
+            console.error(chalk.red(`Error: Invalid block type "${blockType}". Valid types: ${validTypes.join(', ')}`));
+            process.exit(1);
+          }
+
+          const block: BlockObjectRequest = createBlock(blockType, options.content);
+          children = [block];
+        }
+
+        const batchSize = parseBatchSize(options.batchSize, DEFAULT_BATCH_SIZE);
+        const delayMs = parseDelayMs(options.delayMs, DEFAULT_DELAY_MS);
+
+        const responses = await appendBlockChildrenInBatches(
+          pageId,
+          children,
+          batchSize,
+          delayMs,
+          apiKey,
+          globalOpts.config
+        );
+
+        const totalAppended = responses.reduce((sum, response) => sum + response.results.length, 0);
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+
+        if (outputFormat === 'json') {
+          if (responses.length === 1) {
+            output(responses[0], 'json', { fields: globalOpts.fields });
+          } else {
+            output({
+              total_appended: totalAppended,
+              batches: responses.length,
+              batch_size: batchSize,
+              responses,
+            }, 'json', { fields: globalOpts.fields });
+          }
+        } else if (outputFormat !== 'table' || fields) {
+          if (outputFormat === 'compact' && responses.length > 1) {
+            const blocks = responses.flatMap((response) => response.results);
+            output(blocks, outputFormat, { fields: globalOpts.fields });
+          } else {
+            const payload = responses.length === 1 ? responses[0] : {
+              total_appended: totalAppended,
+              batches: responses.length,
+              batch_size: batchSize,
+              responses,
+            };
+            output(payload, outputFormat, { fields: globalOpts.fields });
+          }
+        } else {
+          success('Content appended successfully!');
+          console.log(`${chalk.cyan('Blocks appended:')} ${totalAppended}`);
+          if (responses.length > 1) {
+            console.log(`${chalk.cyan('Batches:')} ${responses.length}`);
+            console.log(`${chalk.cyan('Batch size:')} ${batchSize}`);
+            if (delayMs > 0) {
+              console.log(`${chalk.cyan('Delay (ms):')} ${delayMs}`);
+            }
+          }
+        }
 
       } catch (error) {
         handleError(error, globalOpts.verbose);

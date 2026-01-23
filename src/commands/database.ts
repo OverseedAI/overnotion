@@ -4,7 +4,7 @@ import chalk from 'chalk';
 import { listDatabases, getDatabase, queryDatabase, createDatabase } from '../lib/client.js';
 import { getApiKey, getDefaultDatabase, setDefaultDatabase } from '../lib/config.js';
 import { handleError, requireAuth } from '../lib/errors.js';
-import { output, success, extractDatabaseTitle } from '../lib/output.js';
+import { output, outputLine, parseFieldsInput, success, extractDatabaseTitle } from '../lib/output.js';
 import type { GlobalOptions, DatabaseObjectResponse, PageObjectResponse } from '../types/index.js';
 
 export function createDatabaseCommand(): Command {
@@ -51,7 +51,7 @@ export function createDatabaseCommand(): Command {
           setDefaultDatabase(databaseId, globalOpts.config);
           success(`Default database set to: ${databaseId}`);
         } else {
-          output(databases, globalOpts.output || 'table');
+          output(databases, globalOpts.output || 'table', { fields: globalOpts.fields });
         }
 
       } catch (error) {
@@ -86,8 +86,6 @@ export function createDatabaseCommand(): Command {
         const queryOptions: {
           filter?: unknown;
           sorts?: unknown[];
-          page_size?: number;
-          start_cursor?: string;
         } = {};
 
         if (options.filter) {
@@ -109,31 +107,81 @@ export function createDatabaseCommand(): Command {
           }
         }
 
-        if (options.limit) {
-          queryOptions.page_size = Math.min(parseInt(options.limit, 10), 100);
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+        const limitValue = options.limit ? parseInt(options.limit, 10) : 100;
+        const totalLimit = Number.isFinite(limitValue) && limitValue > 0 ? limitValue : 100;
+
+        if (globalOpts.stream) {
+          if (outputFormat !== 'json' && outputFormat !== 'compact') {
+            console.error(chalk.red('Error: --stream is only supported with -o json or -o compact.'));
+            process.exit(1);
+          }
+
+          let remaining = totalLimit;
+          let cursor = options.startCursor;
+
+          do {
+            const pageSize = Math.min(remaining, 100);
+            const response = await queryDatabase(
+              resolvedId,
+              {
+                ...queryOptions,
+                page_size: pageSize,
+                start_cursor: cursor,
+              },
+              apiKey,
+              globalOpts.config
+            );
+
+            const pages = response.results.filter(
+              (r): r is PageObjectResponse => r.object === 'page'
+            );
+
+            for (const page of pages) {
+              outputLine(page, outputFormat, globalOpts.fields);
+            }
+
+            remaining -= pages.length;
+            cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+          } while (cursor && remaining > 0);
+
+          return;
         }
 
-        if (options.startCursor) {
-          queryOptions.start_cursor = options.startCursor;
-        }
+        const response = await queryDatabase(
+          resolvedId,
+          {
+            ...queryOptions,
+            page_size: Math.min(totalLimit, 100),
+            start_cursor: options.startCursor,
+          },
+          apiKey,
+          globalOpts.config
+        );
 
-        const response = await queryDatabase(resolvedId, queryOptions as Parameters<typeof queryDatabase>[1], apiKey, globalOpts.config);
         const pages = response.results.filter(
           (r): r is PageObjectResponse => r.object === 'page'
         );
 
-        if (globalOpts.output === 'json') {
+        if (outputFormat === 'json' && !fields) {
           output(response, 'json');
-        } else {
-          if (pages.length === 0) {
-            console.log(chalk.yellow('No results found.'));
-          } else {
-            output(pages, globalOpts.output || 'table');
-          }
+          return;
+        }
 
-          if (response.has_more && response.next_cursor) {
-            console.log(chalk.gray(`\nMore results available. Use --start-cursor ${response.next_cursor}`));
+        if (pages.length === 0) {
+          if (outputFormat === 'table' || outputFormat === 'plain') {
+            console.log(chalk.yellow('No results found.'));
+          } else if (outputFormat === 'json') {
+            output([], 'json');
           }
+          return;
+        }
+
+        output(pages, outputFormat, { fields: globalOpts.fields });
+
+        if ((outputFormat === 'table' || outputFormat === 'plain') && response.has_more && response.next_cursor) {
+          console.log(chalk.gray(`\nMore results available. Use --start-cursor ${response.next_cursor}`));
         }
 
       } catch (error) {
@@ -157,9 +205,15 @@ export function createDatabaseCommand(): Command {
 
         const database = await getDatabase(resolvedId, apiKey, globalOpts.config) as DatabaseObjectResponse;
 
-        if (globalOpts.output === 'json') {
-          output(database, 'json');
-        } else {
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+
+        if (outputFormat !== 'table' || fields) {
+          output(database, outputFormat, { fields: globalOpts.fields });
+          return;
+        }
+
+        {
           console.log(chalk.bold(`\nDatabase: ${extractDatabaseTitle(database)}\n`));
           console.log(`${chalk.cyan('ID:')} ${database.id}`);
           console.log(`${chalk.cyan('URL:')} ${database.url}`);

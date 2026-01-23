@@ -55,6 +55,7 @@ onotion page create -p <parent-id> -t "New Page"
 onotion page create -p <db-id> --database -t "New Entry"
 onotion page update <page-id> --icon "🚀"
 onotion page append <page-id> -c "New paragraph"
+onotion page append <page-id> --children-file blocks.json
 onotion page delete <page-id>
 ```
 
@@ -64,18 +65,30 @@ onotion page delete <page-id>
 onotion block get <block-id>
 onotion block list <page-id>
 onotion block append <block-id> -c "Content" --type heading_1
+onotion block append <block-id> --children '[{"object":"block","type":"heading_2","heading_2":{"rich_text":[{"type":"text","text":{"content":"Hi"}}]}}]'
 onotion block delete <block-id>
 ```
 
 ## Output Formats
 
-All commands support three output formats:
+All commands support four output formats:
 
 ```bash
 onotion db list                    # Table (default)
 onotion db list -o json            # JSON
 onotion db list -o plain           # Plain text
+onotion db list -o compact         # JSONL with flattened fields
 ```
+
+Fields and streaming:
+
+```bash
+onotion db query <id> -o json --fields id,title,status
+onotion db query <id> -o compact --fields id,title,status
+onotion db query <id> -o compact --stream --limit 1000
+```
+
+Note: `--stream` is supported with `-o json` or `-o compact`.
 
 ## Configuration
 

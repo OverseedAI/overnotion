@@ -30,6 +30,114 @@ export function getUserFriendlyMessage(code: string): string {
   return errorMessages[code] || `Notion API error: ${code}`;
 }
 
+const DEFAULT_RETRY_OPTIONS = {
+  maxRetries: 4,
+  baseDelayMs: 500,
+  maxDelayMs: 10_000,
+  retryAfterJitterMs: 250,
+};
+
+const RETRYABLE_API_CODES = new Set<string>([
+  APIErrorCode.RateLimited,
+  APIErrorCode.InternalServerError,
+  APIErrorCode.ServiceUnavailable,
+]);
+
+const RETRYABLE_CLIENT_CODES = new Set<string>([
+  ClientErrorCode.RequestTimeout,
+  ClientErrorCode.ResponseError,
+]);
+
+type RetryOptions = Partial<typeof DEFAULT_RETRY_OPTIONS>;
+
+function isRetryableNotionError(error: unknown): boolean {
+  if (!isNotionClientError(error)) return false;
+
+  if (RETRYABLE_API_CODES.has(error.code)) return true;
+  if (RETRYABLE_CLIENT_CODES.has(error.code)) return true;
+
+  const status = (error as { status?: number }).status;
+  if (status && (status === 429 || status >= 500)) return true;
+
+  return false;
+}
+
+function getRetryAfterMs(error: unknown): number | undefined {
+  if (!isNotionClientError(error)) return undefined;
+
+  const headers = (error as { headers?: unknown }).headers;
+  let headerValue: string | undefined;
+
+  if (headers && typeof headers === 'object') {
+    if ('get' in headers && typeof (headers as { get: (name: string) => string | null }).get === 'function') {
+      headerValue = (headers as { get: (name: string) => string | null }).get('retry-after') ?? undefined;
+    } else {
+      const record = headers as Record<string, string | undefined>;
+      headerValue = record['retry-after'] || record['Retry-After'];
+    }
+  }
+
+  if (!headerValue) {
+    const retryAfter = (error as { body?: { retry_after?: number } }).body?.retry_after;
+    if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+      return Math.max(0, retryAfter * 1000);
+    }
+    return undefined;
+  }
+
+  const seconds = Number.parseFloat(headerValue);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+
+  const dateMs = Date.parse(headerValue);
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+
+  return undefined;
+}
+
+function computeDelayMs(retryCount: number, retryAfterMs: number | undefined, options: typeof DEFAULT_RETRY_OPTIONS): number {
+  if (retryAfterMs !== undefined) {
+    const jitter = Math.floor(Math.random() * (options.retryAfterJitterMs + 1));
+    return retryAfterMs + jitter;
+  }
+
+  const exponential = Math.min(options.maxDelayMs, options.baseDelayMs * 2 ** (retryCount - 1));
+  return Math.floor(Math.random() * (exponential + 1));
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function withNotionRetry<T>(fn: () => Promise<T>, options?: RetryOptions): Promise<T> {
+  const resolvedOptions = { ...DEFAULT_RETRY_OPTIONS, ...(options || {}) };
+  let retryCount = 0;
+
+  while (true) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isRetryableNotionError(error) || retryCount >= resolvedOptions.maxRetries) {
+        if (isNotionClientError(error)) {
+          const message = getUserFriendlyMessage(error.code);
+          throw new OverNotionError(error.code, message, error);
+        }
+        throw error;
+      }
+
+      retryCount += 1;
+      const retryAfterMs = getRetryAfterMs(error);
+      const delayMs = computeDelayMs(retryCount, retryAfterMs, resolvedOptions);
+      if (delayMs > 0) {
+        await wait(delayMs);
+      }
+    }
+  }
+}
+
 export async function withNotionError<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();

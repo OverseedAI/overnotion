@@ -14,12 +14,14 @@ program
   .name('onotion')
   .description('A modern, full-featured Notion CLI')
   .version(pkg.version)
-  .option('-o, --output <format>', 'Output format: table, json, plain', 'table')
+  .option('-o, --output <format>', 'Output format: table, json, plain, compact', 'table')
   .option('-v, --verbose', 'Enable verbose output')
   .option('--config <path>', 'Path to config directory')
+  .option('--fields <list>', 'Comma-separated fields for compact/filtered output')
+  .option('--stream', 'Stream results one record per line (json/compact only)')
   .hook('preAction', (thisCommand) => {
     const options = thisCommand.opts();
-    const validFormats: OutputFormat[] = ['table', 'json', 'plain'];
+    const validFormats: OutputFormat[] = ['table', 'json', 'plain', 'compact'];
     if (options.output && !validFormats.includes(options.output as OutputFormat)) {
       console.error(`Invalid output format: ${options.output}. Valid formats: ${validFormats.join(', ')}`);
       process.exit(1);
