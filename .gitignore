@@ -29,3 +29,5 @@ coverage/
 
 # Config (contains API keys)
 .over-notion/
+reference/
+PLAN.md

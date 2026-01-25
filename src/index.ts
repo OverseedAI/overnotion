@@ -4,6 +4,9 @@ import { createDatabaseCommand } from './commands/database.js';
 import { createPageCommand } from './commands/page.js';
 import { createSearchCommand } from './commands/search.js';
 import { createBlockCommand } from './commands/block.js';
+import { createUserCommand } from './commands/user.js';
+import { createCommentCommand } from './commands/comment.js';
+import { createTeamCommand } from './commands/team.js';
 import { handleError } from './lib/errors.js';
 import type { OutputFormat } from './types/index.js';
 import pkg from '../package.json' assert { type: 'json' };
@@ -34,6 +37,9 @@ program.addCommand(createDatabaseCommand());
 program.addCommand(createPageCommand());
 program.addCommand(createSearchCommand());
 program.addCommand(createBlockCommand());
+program.addCommand(createUserCommand());
+program.addCommand(createCommentCommand());
+program.addCommand(createTeamCommand());
 
 // Error handling
 process.on('uncaughtException', (error) => {
