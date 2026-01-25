@@ -1,11 +1,16 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   getPage,
   createPage,
   updatePage,
   archivePage,
+  getClient,
   getBlockChildren,
+  movePage,
+  duplicatePage,
 } from '../lib/client.js';
 import {
   DEFAULT_BATCH_SIZE,
@@ -15,6 +20,7 @@ import {
   parseBlockChildrenInput,
   parseDelayMs,
 } from '../lib/blocks.js';
+import { exportPageToMarkdown, importMarkdownToBlocks } from '../lib/markdown.js';
 import { getApiKey } from '../lib/config.js';
 import { handleError, requireAuth } from '../lib/errors.js';
 import { output, parseFieldsInput, success, extractBlockContent, extractPageTitle } from '../lib/output.js';
@@ -222,10 +228,9 @@ export function createPageCommand(): Command {
 
   page
     .command('move <page-id>')
-    .description('Move page to a new parent (limited support in current Notion API)')
-    .requiredOption('-p, --parent <id>', 'New parent page or database ID')
-    .option('--database', 'New parent is a database')
-    .action(async (pageId: string, options: { parent: string; database?: boolean }) => {
+    .description('Move page to a new parent')
+    .requiredOption('--to <parent-id>', 'New parent page or database ID')
+    .action(async (pageId: string, options: { to: string }) => {
       const globalOpts = page.optsWithGlobals<GlobalOptions>();
 
       try {
@@ -236,25 +241,50 @@ export function createPageCommand(): Command {
         const currentPage = await getPage(pageId, apiKey, globalOpts.config) as PageObjectResponse;
         const title = extractPageTitle(currentPage);
 
-        // Notion API has limited support for moving pages
-        // The 2022-06-28 API version doesn't support changing parent directly
-        // This is a placeholder that attempts the operation
-        console.log(chalk.yellow(`Attempting to move "${title}" to parent ${options.parent}...`));
+        const movedPage = await movePage(pageId, options.to, apiKey, globalOpts.config) as PageObjectResponse;
 
-        if (options.database) {
-          console.log(chalk.gray('Target is a database.'));
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+
+        if (outputFormat !== 'table' || fields) {
+          output(movedPage, outputFormat, { fields: globalOpts.fields });
+          return;
         }
 
-        // Currently, Notion's API doesn't support directly changing a page's parent
-        // This operation will succeed but won't actually move the page
-        // Future API versions may support this
-        const updatedPage = await updatePage(pageId, {}, apiKey, globalOpts.config) as PageObjectResponse;
+        success('Page moved successfully!');
+        console.log(`\n${chalk.cyan('Title:')} ${title}`);
+        console.log(`${chalk.cyan('ID:')} ${movedPage.id}`);
+        console.log(`${chalk.cyan('URL:')} ${movedPage.url}`);
 
-        console.log(chalk.yellow('\nNote: The Notion API (2022-06-28) does not support moving pages between parents.'));
-        console.log(chalk.yellow('This command is included for forward compatibility with future API versions.'));
-        console.log(`\n${chalk.cyan('Page ID:')} ${updatedPage.id}`);
-        console.log(`${chalk.cyan('URL:')} ${updatedPage.url}`);
+      } catch (error) {
+        handleError(error, globalOpts.verbose);
+      }
+    });
 
+  page
+    .command('duplicate <page-id>')
+    .description('Duplicate a page with all its blocks')
+    .option('--title <title>', 'Title for the duplicated page')
+    .action(async (pageId: string, options: { title?: string }) => {
+      const globalOpts = page.optsWithGlobals<GlobalOptions>();
+
+      try {
+        const apiKey = getApiKey(globalOpts.config);
+        requireAuth(apiKey);
+
+        const newPage = await duplicatePage(pageId, { title: options.title }, apiKey, globalOpts.config) as PageObjectResponse;
+
+        const outputFormat = globalOpts.output || 'table';
+        const fields = parseFieldsInput(globalOpts.fields);
+
+        if (outputFormat !== 'table' || fields) {
+          output(newPage, outputFormat, { fields: globalOpts.fields });
+          return;
+        }
+
+        success('Page duplicated successfully!');
+        console.log(`\n${chalk.cyan('ID:')} ${newPage.id}`);
+        console.log(`${chalk.cyan('URL:')} ${newPage.url}`);
       } catch (error) {
         handleError(error, globalOpts.verbose);
       }
@@ -402,6 +432,108 @@ export function createPageCommand(): Command {
           }
         }
 
+      } catch (error) {
+        handleError(error, globalOpts.verbose);
+      }
+    });
+
+  page
+    .command('import <file>')
+    .description('Import a Markdown file and create a new page')
+    .requiredOption('-p, --parent <id>', 'Parent page or database ID')
+    .option('--database', 'Parent is a database (default is page)')
+    .option('-t, --title <title>', 'Page title (default: file name)')
+    .option('--batch-size <number>', 'Max children per request (1-100)', String(DEFAULT_BATCH_SIZE))
+    .option('--delay-ms <number>', 'Delay between batch requests in ms', String(DEFAULT_DELAY_MS))
+    .action(async (file: string, options: {
+      parent: string;
+      database?: boolean;
+      title?: string;
+      batchSize?: string;
+      delayMs?: string;
+    }) => {
+      const globalOpts = page.optsWithGlobals<GlobalOptions>();
+
+      try {
+        const apiKey = getApiKey(globalOpts.config);
+        requireAuth(apiKey);
+
+        const markdownContent = await readFile(file, 'utf8');
+        const blocks = importMarkdownToBlocks(markdownContent);
+
+        const title = options.title ?? path.basename(file).replace(/\.[^/.]+$/, '');
+
+        const params: CreatePageParameters = options.database
+          ? {
+              parent: { type: 'database_id', database_id: options.parent },
+              properties: {
+                Name: {
+                  title: [{ type: 'text', text: { content: title } }],
+                },
+              },
+            }
+          : {
+              parent: { type: 'page_id', page_id: options.parent },
+              properties: {
+                title: {
+                  title: [{ type: 'text', text: { content: title } }],
+                },
+              },
+            };
+
+        const batchSize = parseBatchSize(options.batchSize, DEFAULT_BATCH_SIZE);
+        const delayMs = parseDelayMs(options.delayMs, DEFAULT_DELAY_MS);
+
+        // Notion API limits `children` on create to 100 blocks.
+        const initialChildren = blocks.slice(0, 100);
+        if (initialChildren.length > 0) {
+          params.children = initialChildren;
+        }
+
+        const newPage = await createPage(params, apiKey, globalOpts.config) as PageObjectResponse;
+
+        const remaining = blocks.slice(100);
+        if (remaining.length > 0) {
+          await appendBlockChildrenInBatches(
+            newPage.id,
+            remaining,
+            batchSize,
+            delayMs,
+            apiKey,
+            globalOpts.config
+          );
+        }
+
+        success('Page imported successfully!');
+        console.log(`\n${chalk.cyan('ID:')} ${newPage.id}`);
+        console.log(`${chalk.cyan('URL:')} ${newPage.url}`);
+
+      } catch (error) {
+        handleError(error, globalOpts.verbose);
+      }
+    });
+
+  page
+    .command('export <page-id>')
+    .description('Export a page to Markdown')
+    .option('-o, --output <file>', 'Output file (default: stdout)')
+    .action(async (pageId: string, options: { output?: string }) => {
+      const globalOpts = page.optsWithGlobals<GlobalOptions>();
+
+      try {
+        const apiKey = getApiKey(globalOpts.config);
+        requireAuth(apiKey);
+
+        const client = getClient(apiKey, globalOpts.config);
+        const markdown = await exportPageToMarkdown(pageId, client);
+
+        if (options.output) {
+          await writeFile(options.output, markdown, 'utf8');
+          success(`Markdown exported to ${options.output}`);
+          return;
+        }
+
+        process.stdout.write(markdown.endsWith('\n') ? markdown : `${markdown}\n`);
       } catch (error) {
         handleError(error, globalOpts.verbose);
       }
