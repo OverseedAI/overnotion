@@ -94,6 +94,10 @@ Note: `--stream` is supported with `-o json` or `-o compact`.
 
 Config is stored in `~/.config/onotion/config.json`.
 
+## Releases
+
+Publishing is handled by CI on every push to `main`. The pipeline auto-increments the patch version and publishes to npm, so do not manually tag or publish versions.
+
 ## License
 
 MIT

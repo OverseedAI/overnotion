@@ -17,6 +17,7 @@ import {
 } from '../lib/blocks.js';
 import { getApiKey } from '../lib/config.js';
 import { handleError, requireAuth } from '../lib/errors.js';
+import { markdownToBlocks } from '../lib/markdown.js';
 import { output, parseFieldsInput, success, extractBlockContent, extractPageTitle } from '../lib/output.js';
 import type { GlobalOptions, PageObjectResponse, BlockObjectResponse } from '../types/index.js';
 import type { CreatePageParameters, BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
@@ -136,17 +137,9 @@ export function createPageCommand(): Command {
           }
         }
 
-        // Add initial content if provided
+        // Add initial content if provided (parsed as markdown)
         if (options.content) {
-          params.children = [
-            {
-              object: 'block',
-              type: 'paragraph',
-              paragraph: {
-                rich_text: [{ type: 'text', text: { content: options.content } }],
-              },
-            },
-          ];
+          params.children = markdownToBlocks(options.content);
         }
 
         const newPage = await createPage(params, apiKey, globalOpts.config) as PageObjectResponse;
@@ -304,7 +297,7 @@ export function createPageCommand(): Command {
     .command('append <page-id>')
     .description('Append content to a page')
     .option('-c, --content <text>', 'Content to append')
-    .option('--type <type>', 'Block type (paragraph, heading_1, heading_2, heading_3, bulleted_list_item, numbered_list_item, to_do, toggle, quote, callout, code)', 'paragraph')
+    .option('--type <type>', 'Block type (paragraph, heading_1, heading_2, heading_3, bulleted_list_item, numbered_list_item, to_do, toggle, quote, callout, code)')
     .option('--children <json>', 'JSON array (or {"children":[...]}) of Notion blocks to append')
     .option('--children-file <path>', 'Path to JSON file with array (or {"children":[...]}) of Notion blocks')
     .option('--batch-size <number>', 'Max children per request (1-100)', String(DEFAULT_BATCH_SIZE))
@@ -334,20 +327,24 @@ export function createPageCommand(): Command {
             throw new Error('Provide --content or --children/--children-file.');
           }
 
-          const blockType = options.type || 'paragraph';
-          const validTypes = [
-            'paragraph', 'heading_1', 'heading_2', 'heading_3',
-            'bulleted_list_item', 'numbered_list_item', 'to_do',
-            'toggle', 'quote', 'callout', 'code',
-          ];
+          if (options.type) {
+            // Explicit --type: use single typed block (original behavior)
+            const validTypes = [
+              'paragraph', 'heading_1', 'heading_2', 'heading_3',
+              'bulleted_list_item', 'numbered_list_item', 'to_do',
+              'toggle', 'quote', 'callout', 'code',
+            ];
 
-          if (!validTypes.includes(blockType)) {
-            console.error(chalk.red(`Error: Invalid block type "${blockType}". Valid types: ${validTypes.join(', ')}`));
-            process.exit(1);
+            if (!validTypes.includes(options.type)) {
+              console.error(chalk.red(`Error: Invalid block type "${options.type}". Valid types: ${validTypes.join(', ')}`));
+              process.exit(1);
+            }
+
+            children = [createBlock(options.type, options.content)];
+          } else {
+            // No explicit --type: parse content as markdown
+            children = markdownToBlocks(options.content);
           }
-
-          const block: BlockObjectRequest = createBlock(blockType, options.content);
-          children = [block];
         }
 
         const batchSize = parseBatchSize(options.batchSize, DEFAULT_BATCH_SIZE);

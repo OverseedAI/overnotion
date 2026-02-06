@@ -39,7 +39,8 @@
     "cli-table3": "^0.6.5",
     "commander": "^12.1.0",
     "conf": "^13.0.1",
-    "inquirer": "^9.3.7"
+    "inquirer": "^9.3.7",
+    "marked": "^17.0.1"
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.7",
