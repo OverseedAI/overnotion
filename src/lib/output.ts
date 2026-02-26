@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import Table from 'cli-table3';
+import { encode as toonEncode } from '@toon-format/toon';
 import type { OutputFormat, PropertyValue } from '../types/index.js';
 import type {
   DatabaseObjectResponse,
@@ -155,10 +156,9 @@ function outputCompact(data: unknown, fields?: string[]): void {
   const records = collectCompactRecords(data);
   if (records.length === 0) return;
 
-  for (const record of records) {
-    const line = JSON.stringify(fields ? pickFields(record, fields) : record);
-    console.log(line);
-  }
+  const filtered = fields ? records.map((r) => pickFields(r, fields)) : records;
+  const toonData = filtered.length === 1 ? filtered[0] : filtered;
+  console.log(toonEncode(toonData));
 }
 
 function collectCompactRecords(data: unknown): Record<string, unknown>[] {
